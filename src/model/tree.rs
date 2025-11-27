@@ -9,6 +9,12 @@
 use crate::model::vertex::{BranchLength, Vertex};
 use std::collections::HashMap;
 use std::fmt;
+use std::slice::SliceIndex;
+
+/// Float comparison tolerance
+const EPSILON: f64 = 1e-7;
+// Consider using relative epsilon/comparison, e.g.:
+// (d1 - d2).abs < abs_tol.max(rel_tol * d1.max(d2))
 
 /// Index of a vertex in a tree (arena).
 pub type TreeIndex = usize;
@@ -306,6 +312,16 @@ impl Tree {
         &self[index]
     }
 
+    /// Returns a reference to the vertex at the given index.
+    ///
+    /// # Arguments
+    /// * `index` - The index of the vertex to retrieve
+    ///
+    /// `Some(&Vertex)` if the index is valid, `None` otherwise
+    pub fn vertex_mut(&mut self, index: usize) -> &mut Vertex {
+        &mut self.vertices[index]
+    }
+
     /// Returns the number of leaves this tree was initialized to hold.
     ///
     /// This represents the capacity, not necessarily the current count of leaf vertices.
@@ -316,14 +332,96 @@ impl Tree {
         self.vertices.iter().filter(|&v| v.is_leaf()).count()
     }
 
-    /// Returns the number of leaves this tree was initialized to hold.
+    /// Returns the number of internal vertices in this tree.
     pub fn num_internal(&self) -> usize {
         self.vertices.iter().filter(|&v| v.is_internal()).count()
     }
 
+    /// Returns the number of vertices in this tree.
     pub fn num_vertices(&self) -> usize {
         self.vertices.len()
     }
+
+    /// Returns the height of this tree (assuming it is ultrametric; undefined otherwise),
+    /// that is, the distance of the root to any/each leaf.
+    pub fn height(&self) -> f64 {
+        self.height_of(&self.vertices[self.root_index])
+    }
+
+    /// Returns the height of the given vertex (assuming it is ultrametric; undefined otherwise),
+    /// that is, the distance of the given vertex to any/each leaf.
+    pub fn height_of(&self, vertex: &Vertex) -> f64 {
+        let mut height = 0.0;
+        loop {
+            let child_index = vertex.children().unwrap().0;
+            let vertex: &Vertex = &self.vertices[child_index];
+            height = height + *vertex.branch_length().unwrap();
+
+            if vertex.is_leaf() {
+                break;
+            }
+        }
+
+        height
+    }
+
+    /// Checks if the tree is ultrametric (all leaves equidistant from root).
+    ///
+    /// # Returns
+    /// `true` if all leaves are at the same distance from the root (within floating point tolerance),
+    /// `false` otherwise.
+    ///
+    /// # Panics
+    /// Panics if not all vertices (besides root) have an associated [BranchLength],
+    /// which can be checked first with `vertices_have_branch_lengths()`.
+    pub fn is_ultrametric(&self) -> bool {
+        // Store distance from leaves in subtree to parent for each vertex
+        let mut distances = vec![0.0; self.num_vertices()];
+
+        for vertex in self.post_order_iter() {
+            if vertex.is_leaf() {
+                distances[vertex.index()] = *vertex.branch_length().unwrap();
+            } else {
+                let (left, right) = vertex.children().unwrap();
+                let left_dist = distances[left];
+                let right_dist = distances[right];
+
+                if (left_dist - right_dist).abs() > EPSILON {
+                    return false;
+                }
+
+                if !vertex.is_root() {
+                    distances[vertex.index()] = left_dist + *vertex.branch_length().unwrap();
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Returns the sum of all branch lengths in the tree.
+    ///
+    /// # Panics
+    /// Panics if not all vertices (besides root) have an associated [BranchLength],
+    /// which can be checked first with `vertices_have_branch_lengths()`.
+    pub fn total_branch_length(&self) -> f64 {
+        self.vertices.iter()
+            .filter_map(|v| v.branch_length())
+            .map(|bl| *bl)
+            .sum::<f64>()
+    }
+
+    /// Checks if all non-root vertices have branch lengths set.
+    pub fn vertices_have_branch_lengths(&self) -> bool {
+        for vertex in &self.vertices {
+            if !vertex.is_root() && !vertex.has_branch_length() {
+                return false;
+            }
+        }
+
+        true
+    }
+
 
     /// Returns an iterator over the tree in post-order (children before parents).
     ///
@@ -369,6 +467,123 @@ impl Tree {
     /// ```
     pub fn pre_order_iter(&self) -> PreOrderIter<'_> {
         PreOrderIter::new(self)
+    }
+
+    /// Converts the tree to Newick format string.
+    ///
+    /// The Newick format represents phylogenetic trees as nested parentheses with branch lengths.
+    /// For example: `(('Little Spotted Kiwi;'1.0,'Great Spotted Kiwi':1.0):0.5,'Okarito Brown Kiwi':1.5);`
+    ///
+    /// # Arguments
+    /// * `style` - How to represent leaf labels in the output
+    /// * `leaf_label_map` - Required when using `NewickStyle::Label`, otherwise can be `None`
+    ///
+    /// # Returns
+    /// A Newick format string terminated with `;`. Returns an empty string if
+    /// `NewickStyle::Label` is used without providing a [LeafLabelMap].
+    ///
+    /// # Example
+    /// ```
+    /// use nexus_parser::model::tree::{Tree, LeafLabelMap, NewickStyle};
+    /// use nexus_parser::model::vertex::BranchLength;
+    ///
+    /// let mut tree = Tree::new(2);
+    /// let mut labels = LeafLabelMap::new(2);
+    /// let a = tree.add_leaf(Some(BranchLength::new(1.0)), labels.get_or_insert("A"));
+    /// let b = tree.add_leaf(Some(BranchLength::new(2.0)), labels.get_or_insert("B"));
+    /// tree.add_root((a, b));
+    ///
+    /// let newick = tree.to_newick(NewickStyle::Label, Some(&labels));
+    /// assert_eq!(newick, "(A:1,B:2);");
+    /// ```
+    pub fn to_newick(&self, style: NewickStyle, leaf_label_map: Option<&LeafLabelMap>) -> String {
+        // Helper for adding branch lengths
+        fn build_newick_branch_length(newick: &mut String, branch_length: Option<BranchLength>) {
+            if let Some(branch_length) = branch_length {
+                newick.push(':');
+                newick.push_str(&branch_length.to_string());
+            }
+        }
+
+        // Recursive helper for building the Newick string
+        fn build_newick(tree: &Tree, newick: &mut String, index: TreeIndex, style: &NewickStyle, leaf_label_map: Option<&LeafLabelMap>) {
+            let vertex = &tree[index];
+
+            if vertex.is_leaf() {
+                // Add label based on style
+                let label_index = vertex.label_index().unwrap();
+                match style {
+                    NewickStyle::Label => {
+                        let label = &leaf_label_map.unwrap()[label_index];
+                        newick.push_str(label);
+                    }
+                    NewickStyle::ZeroIndexed => {
+                        newick.push_str(&label_index.to_string());
+                    }
+                    NewickStyle::OneIndexed => {
+                        newick.push_str(&(label_index + 1).to_string());
+                    }
+                }
+                build_newick_branch_length(newick, vertex.branch_length());
+            } else {
+                let (left, right) = vertex.children().unwrap();
+
+                newick.push('(');
+                build_newick(tree, newick, left, style, leaf_label_map);
+                newick.push(',');
+                build_newick(tree, newick, right, style, leaf_label_map);
+                newick.push(')');
+
+                if !vertex.is_root() {
+                    build_newick_branch_length(newick, vertex.branch_length());
+                }
+            }
+        }
+
+        // Abort right away if arguments don't match
+        if matches!(style, NewickStyle::Label) && leaf_label_map.is_none() {
+            return String::new();
+        }
+
+        // Estimate capacity:
+        // - Each leaf: "label" (can compute total) or "id" ~= 2
+        const LEAF_ID_CHARS: usize = 2;  // "99" for indices
+        // - Each internal node: "(,)" ~= 3 chars
+        const INTERNAL_NODE_CHARS: usize = 3;  // "(,)"
+        // - Branch lengths: ~20 chars each (e.g., ":0.009529961339106089")
+        const BRANCH_LENGTH_CHARS: usize = 20;
+
+        // -> Structural
+        let num_internal = self.num_internal() + 1; // +1 for root
+        let structure_capacity = num_internal * INTERNAL_NODE_CHARS;
+
+        // -> Labels
+        let num_leaves = self.num_leaves();
+        let label_capacity = match style {
+            NewickStyle::Label => {
+                let total_label_len: usize = leaf_label_map.unwrap().labels.iter().map(|s| s.len()).sum();
+                total_label_len
+            }
+            NewickStyle::ZeroIndexed | NewickStyle::OneIndexed => {
+                num_leaves * LEAF_ID_CHARS
+            }
+        };
+
+        // -> Branch lengths
+        let branch_capacity = if self.vertices_have_branch_lengths() {
+            (num_leaves + num_internal - 1) * BRANCH_LENGTH_CHARS
+        } else {
+            0
+        };
+
+        // => Total
+        let estimated_capacity = structure_capacity + label_capacity + branch_capacity;
+        let mut newick = String::with_capacity(estimated_capacity);
+
+        build_newick(&self, &mut newick, self.root_index, &style, leaf_label_map);
+        newick.push(';');
+
+        newick
     }
 
     /// Prints a visual representation of the tree to the console.
@@ -446,6 +661,7 @@ impl Tree {
         }
     }
 }
+
 
 impl std::ops::Index<TreeIndex> for Tree {
     type Output = Vertex;
@@ -626,6 +842,18 @@ impl std::ops::Index<LabelIndex> for LeafLabelMap {
     }
 }
 
+/// Style for serializing tree to Newick format,
+/// controlling how leaf labels are represented in the output string.
+#[derive(Debug, Clone, Copy)]
+pub enum NewickStyle {
+    /// Use full leaf labels from the LeafLabelMap
+    Label,
+    /// Use 0-based indices (0, 1, 2, ...)
+    ZeroIndexed,
+    /// Use 1-based indices (1, 2, 3, ...) (as in Nexus files)
+    OneIndexed,
+}
+
 /// Iterator for post-order traversal (children before parents).
 ///
 /// This iterator uses a stack-based approach to traverse the tree without recursion.
@@ -705,3 +933,4 @@ impl<'a> Iterator for PreOrderIter<'a> {
         Some(vertex)
     }
 }
+

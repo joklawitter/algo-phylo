@@ -93,6 +93,15 @@ impl Vertex {
         }
     }
 
+    /// Returns whether this vertex has a [BranchLength].
+    pub fn has_branch_length(&self) -> bool {
+        match self {
+            Vertex::Root { .. } => true,
+            Vertex::Internal { branch_length, .. } => branch_length.is_some(),
+            Vertex::Leaf { branch_length, .. } => branch_length.is_some(),
+        }
+    }
+
     /// Returns the branch length if this is a non-root vertex, else `None`.
     pub fn branch_length(&self) -> Option<BranchLength> {
         match self {

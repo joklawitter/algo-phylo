@@ -1,4 +1,4 @@
-use nexus_parser::model::tree::{LeafLabelMap, Tree};
+use nexus_parser::model::tree::{LeafLabelMap, NewickStyle, Tree};
 use nexus_parser::model::vertex::BranchLength;
 
 #[test]
@@ -175,3 +175,42 @@ fn test_iter_on_empty_tree() {
     assert_eq!(pre_count, 0);
 }
 
+
+// ============= To Newick Tests =============
+
+#[test]
+fn test_to_newick_with_labels() {
+    let mut tree = Tree::new(3);
+    let mut labels = LeafLabelMap::new(3);
+
+    let a = tree.add_leaf(Some(BranchLength::new(1.0)), labels.get_or_insert("A"));
+    let b = tree.add_leaf(Some(BranchLength::new(1.0)), labels.get_or_insert("B"));
+    let c = tree.add_leaf(Some(BranchLength::new(2.0)), labels.get_or_insert("C"));
+    let internal = tree.add_internal_vertex((a, b), Some(BranchLength::new(0.5)));
+    tree.add_root((internal, c));
+
+    let newick = tree.to_newick(NewickStyle::Label, Some(&labels));
+    assert_eq!(newick, "((A:1,B:1):0.5,C:2);");
+}
+
+#[test]
+fn test_to_newick_zero_indexed() {
+    let mut tree = Tree::new(2);
+    let a = tree.add_leaf(Some(BranchLength::new(1.0)), 0);
+    let b = tree.add_leaf(Some(BranchLength::new(2.0)), 1);
+    tree.add_root((a, b));
+
+    let newick = tree.to_newick(NewickStyle::ZeroIndexed, None);
+    assert_eq!(newick, "(0:1,1:2);");
+}
+
+#[test]
+fn test_to_newick_one_indexed() {
+    let mut tree = Tree::new(2);
+    let a = tree.add_leaf(Some(BranchLength::new(1.5)), 0);
+    let b = tree.add_leaf(Some(BranchLength::new(2.5)), 1);
+    tree.add_root((a, b));
+
+    let newick = tree.to_newick(NewickStyle::OneIndexed, None);
+    assert_eq!(newick, "(1:1.5,2:2.5);");
+}
